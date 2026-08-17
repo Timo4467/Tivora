@@ -1,0 +1,158 @@
+# ============================================================================
+# Tivora — Community Edition (Self-Hosted)
+# Dienstplan | WERIT Solutions
+#
+# Zwei-Container-Architektur (+ einmaliger Migrations-Job):
+#
+#   Docker Host
+#   ├── app         (Frontend + Backend, Port 5000 → Host ${APP_PORT})
+#   ├── postgres    (Datenbank, NUR im internen Netzwerk erreichbar)
+#   └── Volumes     (postgres-data, app-data → persistente Daten)
+#
+# Persistenz: Die Datenbank (postgres-data) und Anwendungsdaten
+# (app-data: Vault-Schlüssel, Lizenz) bleiben bei
+#   docker compose down / pull / up -d
+# vollständig erhalten. Es werden KEINE Volumes gelöscht.
+# ============================================================================
+name: tivora-ce
+
+volumes:
+  postgres-data:
+    name: tivora-ce-postgres-data
+  app-data:
+    name: tivora-ce-app-data
+
+networks:
+  # Internes Netz: DB ist NUR hierüber erreichbar (nicht öffentlich).
+  internal:
+    name: tivora-ce-internal
+    internal: true
+  # Öffentliches Netz: nur der App-Container hängt hier (Port-Mapping).
+  edge:
+    name: tivora-ce-edge
+
+services:
+  # ==========================================================================
+  # PostgreSQL — eigener Container, persistentes Volume, nur intern erreichbar
+  # ==========================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: tivora-ce-postgres
+    restart: unless-stopped
+    networks:
+      - internal
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tivora}
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER erforderlich}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD erforderlich}
+      PG_APP_USER: ${PG_APP_USER:?PG_APP_USER erforderlich}
+      PG_APP_PASSWORD: ${PG_APP_PASSWORD:?PG_APP_PASSWORD erforderlich}
+      TZ: ${TZ:-Europe/Berlin}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./docker/db/init:/docker-entrypoint-initdb.d:ro
+    # Kein ports:-Mapping → DB ist von außen NICHT erreichbar.
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ==========================================================================
+  # Migrate — einmaliger Job: wendet Prisma-Migrationen mit der Owner-Rolle an
+  # und beendet sich. Löscht NIEMALS Daten (nur `migrate deploy`).
+  # ==========================================================================
+  migrate:
+    image: ${APP_IMAGE:-ghcr.io/timo4467/tivora-community:1.0}
+    container_name: tivora-ce-migrate
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - internal
+    environment:
+      NODE_ENV: production
+      # Schema-Sync + Bootstrap brauchen DDL-Rechte → Owner-Rolle.
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-tivora}
+      RLS_STRICT: "false"
+      TZ: ${TZ:-Europe/Berlin}
+    # Erst das Schema anlegen/abgleichen (db push), dann Tenants + RLS bootstrappen.
+    # Idempotent — kann bei jedem Update erneut laufen. Löscht keine Daten.
+    command:
+      - sh
+      - -c
+      - >-
+        npx prisma db push --accept-data-loss --schema=./prisma/schema.prisma &&
+        npx prisma db execute --file ./prisma/ce-bootstrap.sql
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ==========================================================================
+  # App — Monolith: React-Frontend + Express-Backend (Port 5000)
+  # Läuft mit der NOBYPASSRLS-App-Rolle (Row-Level-Security aktiv).
+  # ==========================================================================
+  app:
+    image: ${APP_IMAGE:-ghcr.io/timo4467/tivora-community:1.0}
+    container_name: tivora-ce-app
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    networks:
+      - internal
+      - edge
+    ports:
+      - "${APP_PORT:-3000}:5000"
+    environment:
+      NODE_ENV: production
+      APP_VERSION: ${APP_VERSION:-1.0.0}
+      # Runtime nutzt die App-Rolle (NOBYPASSRLS) → echte Row-Level-Security.
+      DATABASE_URL: postgresql://${PG_APP_USER}:${PG_APP_PASSWORD}@postgres:5432/${POSTGRES_DB:-tivora}
+      # Single-Tenant CE: RLS-Policies bleiben aktiv (Defense-in-Depth für
+      # authentifizierte Queries); Pre-Auth-Queries (Login) laufen ohne
+      # Tenant-Kontext → automatischer Bypass. Daher RLS_STRICT=false.
+      RLS_STRICT: ${RLS_STRICT:-false}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET erforderlich (min. 32 Zeichen)}
+      VAULT_MASTER_KEY: ${VAULT_MASTER_KEY:?VAULT_MASTER_KEY erforderlich}
+      SETUP_TOKEN: ${SETUP_TOKEN:-}
+      # Öffentliche URL (für Links in E-Mails, Origin-Check, Cookies).
+      APP_BASE_URL: ${APP_URL:-}
+      ALLOWED_ORIGINS: ${APP_URL:-}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Lizenzdatei (Professional) im persistenten app-data-Volume.
+      LICENSE_FILE: /app/data/license/license.json
+      TZ: ${TZ:-Europe/Berlin}
+      # Optionale Microsoft-365-Integration (Professional-Feature).
+      MICROSOFT_CLIENT_ID: ${MICROSOFT_CLIENT_ID:-}
+      MICROSOFT_CLIENT_SECRET: ${MICROSOFT_CLIENT_SECRET:-}
+      MICROSOFT_TENANT_ID: ${MICROSOFT_TENANT_ID:-}
+      REDIRECT_URI: ${REDIRECT_URI:-}
+    volumes:
+      - app-data:/app/data
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5000/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "3"
