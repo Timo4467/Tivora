@@ -53,16 +53,66 @@ gen_secret() {
 
 # ---- Docker-Compose-Wrapper ------------------------------------------------
 DC=""
-detect_compose() {
-  if docker compose version >/dev/null 2>&1; then
-    DC="docker compose"
-  elif command -v docker-compose >/dev/null 2>&1; then
-    DC="docker-compose"
-  else
-    return 1
-  fi
-}
 dc() { $DC -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
+
+# Paketmanager + sudo erkennen
+PKG=""; SUDO=""
+have() { command -v "$1" >/dev/null 2>&1; }
+detect_pkg() {
+  if [[ "$(id -u)" -eq 0 ]]; then SUDO=""; elif have sudo; then SUDO="sudo"; else SUDO=""; fi
+  if   have apt-get; then PKG="apt"
+  elif have dnf;     then PKG="dnf"
+  elif have yum;     then PKG="yum"
+  elif have apk;     then PKG="apk"
+  elif have pacman;  then PKG="pacman"
+  else PKG=""; fi
+}
+pkg_install() {
+  case "$PKG" in
+    apt)    $SUDO apt-get update -y >/dev/null 2>&1; $SUDO apt-get install -y "$@" ;;
+    dnf)    $SUDO dnf install -y "$@" ;;
+    yum)    $SUDO yum install -y "$@" ;;
+    apk)    $SUDO apk add --no-cache "$@" ;;
+    pacman) $SUDO pacman -Sy --noconfirm "$@" ;;
+    *)      return 1 ;;
+  esac
+}
+ask_yes() { local a; read -r -p "$(printf "${c_blue}%s${c_reset} [Y/n]: " "$1")" a || true; [[ "${a,,}" != "n" ]]; }
+
+# Prüft, ob $DC die compose.yml WIRKLICH parst (entlarvt alte docker-compose v1
+# bzw. Podman-Shims, die den modernen Compose-Spec nicht verstehen).
+compose_works() {
+  [[ -n "$DC" ]] || return 1
+  local tmp rc; tmp="$(mktemp)"
+  printf 'POSTGRES_USER=x\nPOSTGRES_PASSWORD=x\nPG_APP_USER=x\nPG_APP_PASSWORD=x\nSESSION_SECRET=00000000000000000000000000000000\nVAULT_MASTER_KEY=x\n' > "$tmp"
+  $DC -f "$COMPOSE_FILE" --env-file "$tmp" config >/dev/null 2>&1; rc=$?
+  rm -f "$tmp"; return $rc
+}
+# Wählt die Compose-Variante, die die Datei tatsächlich parst.
+detect_compose() {
+  local cand
+  for cand in "docker compose" "docker-compose"; do
+    if $cand version >/dev/null 2>&1; then DC="$cand"; compose_works && return 0; fi
+  done
+  DC=""; return 1
+}
+install_docker() {
+  info "Installiere Docker Engine (get.docker.com) ..."
+  if have curl; then curl -fsSL https://get.docker.com | $SUDO sh
+  elif have wget; then $SUDO sh -c "$(wget -qO- https://get.docker.com)"
+  else return 1; fi
+  $SUDO systemctl enable --now docker >/dev/null 2>&1 || $SUDO service docker start >/dev/null 2>&1 || true
+}
+install_compose_v2() {
+  info "Installiere Docker Compose v2 ..."
+  case "$PKG" in apt|dnf|yum) pkg_install docker-compose-plugin >/dev/null 2>&1 || true ;; esac
+  detect_compose && return 0
+  # Standalone-Binary (nutzt den vorhandenen Docker-/Podman-Socket)
+  local os arch url; os="$(uname -s | tr '[:upper:]' '[:lower:]')"; arch="$(uname -m)"
+  url="https://github.com/docker/compose/releases/latest/download/docker-compose-${os}-${arch}"
+  if have curl; then $SUDO curl -fsSL "$url" -o /usr/local/bin/docker-compose && $SUDO chmod +x /usr/local/bin/docker-compose
+  elif have wget; then $SUDO wget -qO /usr/local/bin/docker-compose "$url" && $SUDO chmod +x /usr/local/bin/docker-compose; fi
+}
 
 # Ist APP_IMAGE ein Registry-Ref (z.B. ghcr.io/owner/img) → dann kann per
 # `docker pull` ein vorgefertigtes Image geladen werden statt lokal zu bauen.
@@ -76,46 +126,75 @@ is_registry_ref() {
 }
 
 # ============================================================================
-# 1) System-Check
+# 1) System-Check — prüft Abhängigkeiten und bietet Installation an
 # ============================================================================
 system_check() {
   hr; info "System-Check"; hr
+  detect_pkg
   local failed=0
 
-  if command -v docker >/dev/null 2>&1; then
-    ok "Docker installiert ($(docker --version | awk '{print $3}' | tr -d ','))"
+  # --- curl (für Health-Check & Ersteinrichtung) ---
+  if have curl; then
+    ok "curl vorhanden"
   else
-    err "Docker fehlt"
-    cat <<'EOF'
-    Installiere Docker Engine:
-      Linux:  curl -fsSL https://get.docker.com | sudo sh
-      Docs:   https://docs.docker.com/engine/install/
-EOF
-    failed=1
+    warn "curl fehlt (wird für Health-Check/Setup benötigt)."
+    if [[ -n "$PKG" ]] && ask_yes "curl jetzt installieren?"; then
+      pkg_install curl && ok "curl installiert" || { err "curl-Installation fehlgeschlagen."; failed=1; }
+    else failed=1; fi
   fi
 
-  if detect_compose; then
-    ok "Docker Compose verfügbar ($DC)"
+  # --- Docker Engine ---
+  if have docker; then
+    ok "Docker installiert ($(docker --version 2>/dev/null | awk '{print $3}' | tr -d ','))"
   else
-    err "Docker Compose fehlt (Plugin 'docker compose' oder 'docker-compose')."
-    echo "    Docs: https://docs.docker.com/compose/install/"
-    failed=1
+    warn "Docker ist nicht installiert."
+    if ask_yes "Docker Engine jetzt automatisch installieren?"; then
+      install_docker && have docker && ok "Docker installiert" || { err "Docker-Installation fehlgeschlagen (siehe https://docs.docker.com/engine/install/)."; failed=1; }
+    else
+      err "Docker wird benötigt: https://docs.docker.com/engine/install/"; failed=1
+    fi
   fi
 
-  if docker info >/dev/null 2>&1; then
-    ok "Docker-Daemon erreichbar / ausreichende Rechte"
-  else
-    err "Docker-Daemon nicht erreichbar. Als root ausführen oder Benutzer zur 'docker'-Gruppe hinzufügen:"
-    echo "    sudo usermod -aG docker \"\$USER\" && newgrp docker"
-    failed=1
+  # --- Docker-Daemon ---
+  if have docker; then
+    docker info >/dev/null 2>&1 || { info "Starte Docker-Daemon ..."; $SUDO systemctl start docker >/dev/null 2>&1 || $SUDO service docker start >/dev/null 2>&1 || true; }
+    if docker info >/dev/null 2>&1; then
+      ok "Docker-Daemon erreichbar / ausreichende Rechte"
+    else
+      err "Docker-Daemon nicht erreichbar. Benutzer zur 'docker'-Gruppe hinzufügen und neu einloggen:"
+      echo "    sudo usermod -aG docker \"\$USER\" && newgrp docker"
+      failed=1
+    fi
   fi
 
+  # --- Docker Compose v2 (muss die compose.yml wirklich parsen) ---
+  if have docker && docker info >/dev/null 2>&1; then
+    if detect_compose; then
+      ok "Docker Compose v2 verfügbar ($DC)"
+    else
+      warn "Kein kompatibles Docker Compose v2 gefunden (alte docker-compose v1 bzw. Podman-Shim parst die Datei nicht)."
+      if ask_yes "Docker Compose v2 jetzt installieren?"; then
+        install_compose_v2
+        if detect_compose; then
+          ok "Docker Compose v2 installiert ($DC)"
+        else
+          err "Docker Compose v2 weiterhin nicht nutzbar."
+          echo "    Podman-System? Bitte echtes Docker installieren:  curl -fsSL https://get.docker.com | sudo sh"
+          echo "    Oder Compose v2 manuell: https://docs.docker.com/compose/install/"
+          failed=1
+        fi
+      else failed=1; fi
+    fi
+  fi
+
+  # --- Architektur ---
   local arch; arch="$(uname -m)"
   case "$arch" in
     x86_64|amd64|aarch64|arm64) ok "Architektur unterstützt ($arch)" ;;
     *) warn "Architektur '$arch' ist nicht offiziell getestet." ;;
   esac
 
+  # --- Projektdateien ---
   [[ -f "$COMPOSE_FILE" ]] && ok "Compose-Datei vorhanden" || { err "compose.yml fehlt"; failed=1; }
   if [[ -f "$SCRIPT_DIR/Dockerfile" ]]; then
     ok "Dockerfile vorhanden (lokaler Build möglich)"
