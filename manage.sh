@@ -125,7 +125,7 @@ cmd_health() {
   db_healthy  && { d="healthy"; u="$(active_users)"; }
   local st; st="$(curl -fsS "http://127.0.0.1:${APP_PORT}/api/system/setup-status" 2>/dev/null || echo '')"
   case "$st" in
-    *'"edition":"PROFESSIONAL"'*) ed="Professional"; maxu="\u221e" ;;
+    *'"edition":"PROFESSIONAL"'*) ed="Professional"; maxu="∞" ;;
     *'"edition":"COMMUNITY"'*)    ed="Community";    maxu="5" ;;
   esac
   [[ "$st" =~ \"version\":\"([^\"]+)\" ]] && ver="${BASH_REMATCH[1]}"
@@ -133,7 +133,7 @@ cmd_health() {
   printf "  %-14s %s\n" "Database"    "$d"
   printf "  %-14s %s\n" "Version"     "$ver"
   printf "  %-14s %s\n" "Edition"     "$ed"
-  printf "  %-14s %s / %b\n" "Users"    "$u" "$maxu"
+  printf "  %-14s %s / %s\n" "Users"    "$u" "$maxu"
 }
 
 # ---------------------------------------------------------------------------
