@@ -108,7 +108,7 @@ cmd_status() {
 
 cmd_start()   { info "Starte Stack ..."; dc up -d; ok "Gestartet"; }
 cmd_stop()    { info "Stoppe Stack (Daten bleiben erhalten) ..."; dc stop; ok "Gestoppt"; }
-cmd_restart() { info "Neustart ..."; dc restart; ok "Neu gestartet"; }
+cmd_restart() { info "Neustart (übernimmt .env-Änderungen) ..."; dc up -d --force-recreate; ok "Neu gestartet"; }
 cmd_logs()    { dc logs -f --tail="${2:-100}" "${SERVICE:-}"; }
 
 cmd_version() {
