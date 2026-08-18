@@ -117,7 +117,11 @@ EOF
   esac
 
   [[ -f "$COMPOSE_FILE" ]] && ok "Compose-Datei vorhanden" || { err "compose.yml fehlt"; failed=1; }
-  [[ -f "$SCRIPT_DIR/Dockerfile" ]] && ok "Dockerfile vorhanden" || { err "Dockerfile fehlt"; failed=1; }
+  if [[ -f "$SCRIPT_DIR/Dockerfile" ]]; then
+    ok "Dockerfile vorhanden (lokaler Build möglich)"
+  else
+    info "Kein Dockerfile — Installation per vorgefertigtem Image (Pull-Modus)"
+  fi
 
   [[ "$failed" -eq 0 ]] || die "System-Check fehlgeschlagen. Bitte die obigen Punkte beheben."
   echo
