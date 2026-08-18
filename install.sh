@@ -442,6 +442,8 @@ start_stack() {
 }
 
 create_admin() {
+  # Werte aus der .env (SETUP_TOKEN etc.) global verfügbar machen.
+  [[ -f "$ENV_FILE" ]] && { set -a; source "$ENV_FILE"; set +a; }
   # Bereits eingerichtet (z.B. bei .env-Wiederverwendung)? → Admin-Anlage überspringen.
   local st
   st="$(curl -fsS "http://127.0.0.1:${APP_PORT}/api/system/setup-status" 2>/dev/null || echo '')"
@@ -457,7 +459,7 @@ create_admin() {
   info "Lege ersten Administrator an ..."
   local payload status body
   payload=$(cat <<JSON
-{"token":"${SETUP_TOKEN}","admin":{"email":"${ADMIN_EMAIL}","firstName":"${ADMIN_FIRST}","lastName":"${ADMIN_LAST}","password":"${ADMIN_PW}"},"companyName":"","timezone":"${TZ}","locale":"de","appUrl":"${APP_URL%/}"}
+{"token":"${SETUP_TOKEN:-}","admin":{"email":"${ADMIN_EMAIL}","firstName":"${ADMIN_FIRST}","lastName":"${ADMIN_LAST}","password":"${ADMIN_PW}"},"companyName":"","timezone":"${TZ}","locale":"de","appUrl":"${APP_URL%/}"}
 JSON
 )
   body=$(curl -fsS -o /dev/null -w '%{http_code}' \
