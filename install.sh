@@ -117,6 +117,31 @@ install_compose_v2() {
   elif have wget; then $SUDO wget -qO /usr/local/bin/docker-compose "$url" && $SUDO chmod +x /usr/local/bin/docker-compose; fi
 }
 
+# Podman stellt für Compose einen Docker-kompatiblen API-Socket bereit — der
+# muss laufen. `docker info` klappt bei Podman auch ohne Socket, Compose NICHT.
+is_podman() { command -v podman >/dev/null 2>&1 || docker --version 2>/dev/null | grep -qi podman; }
+ensure_podman_socket() {
+  is_podman || return 0
+  local uid sock
+  uid="$(id -u)"
+  if [[ "$uid" -eq 0 ]]; then
+    sock="/run/podman/podman.sock"
+    systemctl enable --now podman.socket >/dev/null 2>&1 || true
+  else
+    sock="/run/user/${uid}/podman/podman.sock"
+    systemctl --user enable --now podman.socket >/dev/null 2>&1 || true
+    loginctl enable-linger "$(id -un)" >/dev/null 2>&1 || true
+  fi
+  if [[ -S "$sock" ]]; then
+    export DOCKER_HOST="unix://${sock}"
+    ok "Podman-API-Socket aktiv ($sock)"
+  else
+    warn "Podman-Socket nicht aktiv. Bitte einmalig ausführen:"
+    if [[ "$uid" -eq 0 ]]; then echo "    systemctl enable --now podman.socket"
+    else echo "    systemctl --user enable --now podman.socket"; fi
+  fi
+}
+
 # Ist APP_IMAGE ein Registry-Ref (z.B. ghcr.io/owner/img) → dann kann per
 # `docker pull` ein vorgefertigtes Image geladen werden statt lokal zu bauen.
 # Lokale Namen ohne Registry-Host (z.B. tivora/community) werden gebaut.
@@ -168,6 +193,8 @@ system_check() {
       echo "    sudo usermod -aG docker \"\$USER\" && newgrp docker"
       failed=1
     fi
+    # Podman: Docker-kompatiblen Socket sicherstellen (Compose braucht ihn).
+    ensure_podman_socket
   fi
 
   # --- Docker Compose v2 (muss die compose.yml wirklich parsen) ---

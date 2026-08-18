@@ -30,6 +30,18 @@ die()   { err "$*"; exit 1; }
 set -a; source "$ENV_FILE"; set +a
 : "${APP_PORT:=3000}"; : "${POSTGRES_USER:=tivora_owner}"; : "${POSTGRES_DB:=tivora}"; : "${APP_VERSION:=1.0.0}"
 
+# Podman: Docker-kompatiblen API-Socket sicherstellen (Compose braucht ihn).
+if command -v podman >/dev/null 2>&1 || docker --version 2>/dev/null | grep -qi podman; then
+  if [[ "$(id -u)" -eq 0 ]]; then
+    systemctl enable --now podman.socket >/dev/null 2>&1 || true
+    [[ -S /run/podman/podman.sock ]] && export DOCKER_HOST="unix:///run/podman/podman.sock"
+  else
+    systemctl --user enable --now podman.socket >/dev/null 2>&1 || true
+    _psock="/run/user/$(id -u)/podman/podman.sock"
+    [[ -S "$_psock" ]] && export DOCKER_HOST="unix://${_psock}"
+  fi
+fi
+
 # Docker-Compose-Wrapper — wählt die Variante, die die compose.yml WIRKLICH parst
 # (fängt alte docker-compose v1 / Podman-Shims ab).
 DC=""
