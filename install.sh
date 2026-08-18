@@ -270,9 +270,13 @@ start_stack() {
     if dc pull; then
       ok "Image geladen"
       dc up -d
-    else
+    elif [[ -f "$SCRIPT_DIR/Dockerfile" ]]; then
       warn "Pull fehlgeschlagen — baue stattdessen lokal."
       dc up -d --build
+    else
+      err "Image konnte nicht geladen werden: ${APP_IMAGE}"
+      err "Privates Image? Bitte zuerst anmelden:  docker login ghcr.io -u <github-user>"
+      die "Danach ./install.sh erneut starten."
     fi
   else
     info "Baue & starte Container (das kann beim ersten Mal einige Minuten dauern) ..."
