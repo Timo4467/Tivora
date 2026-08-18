@@ -76,6 +76,16 @@ active_users() {
 app_healthy() { curl -fsS "http://127.0.0.1:${APP_PORT}/api/health" >/dev/null 2>&1; }
 db_healthy()  { dc exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; }
 
+# Edition live von der App (public endpoint) — nicht hart codieren.
+app_edition() {
+  local st; st="$(curl -fsS "http://127.0.0.1:${APP_PORT}/api/system/setup-status" 2>/dev/null || echo '')"
+  case "$st" in
+    *'"edition":"PROFESSIONAL"'*) echo "Professional" ;;
+    *'"edition":"COMMUNITY"'*)    echo "Community" ;;
+    *) echo "unbekannt" ;;
+  esac
+}
+
 cmd_status() {
   local img="${APP_IMAGE:-}"
   printf "Image     : "
@@ -102,22 +112,28 @@ cmd_restart() { info "Neustart ..."; dc restart; ok "Neu gestartet"; }
 cmd_logs()    { dc logs -f --tail="${2:-100}" "${SERVICE:-}"; }
 
 cmd_version() {
-  printf "Tivora Community Edition\n"
+  local ed; ed="$(app_edition)"
+  printf "Tivora \u2014 %s\n" "$ed"
   printf "  Version : %s\n" "$APP_VERSION"
-  printf "  Edition : Community (max. 5 aktive Benutzer)\n"
   local img; img="$(dc images app 2>/dev/null | awk 'NR==2{print $2":"$3}')" || true
   [[ -n "${img:-}" ]] && printf "  Image   : %s\n" "$img"
 }
 
 cmd_health() {
-  local a="unreachable" d="unreachable" u="?"
+  local a="unreachable" d="unreachable" u="?" ed="unbekannt" maxu="?" ver="$APP_VERSION"
   app_healthy && a="healthy"
   db_healthy  && { d="healthy"; u="$(active_users)"; }
+  local st; st="$(curl -fsS "http://127.0.0.1:${APP_PORT}/api/system/setup-status" 2>/dev/null || echo '')"
+  case "$st" in
+    *'"edition":"PROFESSIONAL"'*) ed="Professional"; maxu="\u221e" ;;
+    *'"edition":"COMMUNITY"'*)    ed="Community";    maxu="5" ;;
+  esac
+  [[ "$st" =~ \"version\":\"([^\"]+)\" ]] && ver="${BASH_REMATCH[1]}"
   printf "  %-14s %s\n" "Application" "$a"
   printf "  %-14s %s\n" "Database"    "$d"
-  printf "  %-14s %s\n" "Version"     "$APP_VERSION"
-  printf "  %-14s %s\n" "Edition"     "Community"
-  printf "  %-14s %s / 5\n" "Users"   "$u"
+  printf "  %-14s %s\n" "Version"     "$ver"
+  printf "  %-14s %s\n" "Edition"     "$ed"
+  printf "  %-14s %s / %b\n" "Users"    "$u" "$maxu"
 }
 
 # ---------------------------------------------------------------------------
@@ -249,7 +265,15 @@ cmd_uninstall() {
   read -r -p "Zum LÖSCHEN 'DELETE' eingeben, sonst Enter (Daten behalten): " d
   if [[ "$d" == "DELETE" ]]; then
     dc down -v --remove-orphans
-    ok "Container, Netzwerke und Volumes entfernt — Daten gelöscht."
+    # Lokale generierte Daten ebenfalls entfernen (.env, data/, backups/).
+    rm -rf "$SCRIPT_DIR/data" "$SCRIPT_DIR/backups" "$SCRIPT_DIR/.env"
+    ok "Container, Netzwerke, Volumes und lokale Daten (.env, data/, backups/) entfernt."
+    read -r -p "Auch die Installationsdateien in $SCRIPT_DIR löschen? (y/N): " full
+    if [[ "${full,,}" == "y" ]]; then
+      cd / && rm -rf "$SCRIPT_DIR" && ok "Verzeichnis entfernt — Tivora vollständig deinstalliert."
+    else
+      info "Installationsdateien behalten. Komplett entfernen: rm -rf \"$SCRIPT_DIR\""
+    fi
   else
     dc down --remove-orphans
     ok "Container & Netzwerke entfernt. Daten (Volumes) bleiben erhalten."

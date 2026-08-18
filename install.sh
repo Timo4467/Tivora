@@ -313,6 +313,14 @@ configure() {
   local secure="false"
   [[ "$APP_URL" == https://* ]] && secure="true"
 
+  # Erlaubte Origins: URL + Server-IP + localhost, damit Zugriff per Domain UND
+  # per IP funktioniert (inkl. Login/CSRF-Prüfung).
+  local SERVER_IP ALLOWED
+  SERVER_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
+  ALLOWED="${APP_URL%/}"
+  [[ -n "$SERVER_IP" ]] && ALLOWED="${ALLOWED},http://${SERVER_IP}:${APP_PORT},https://${SERVER_IP}"
+  ALLOWED="${ALLOWED},http://localhost:${APP_PORT},http://127.0.0.1:${APP_PORT}"
+
   # Port-Verfügbarkeit
   if port_available "$APP_PORT"; then
     ok "Port $APP_PORT verfügbar"
@@ -332,6 +340,7 @@ configure() {
   cat > "$ENV_FILE" <<EOF
 # Automatisch erzeugt von install.sh am $(date -Iseconds)
 APP_URL=${APP_URL%/}
+ALLOWED_ORIGINS=${ALLOWED}
 APP_PORT=${APP_PORT}
 COOKIE_SECURE=${secure}
 TZ=${TZ}
