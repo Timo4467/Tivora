@@ -40,6 +40,13 @@ if command -v podman >/dev/null 2>&1 || docker --version 2>/dev/null | grep -qi 
     _psock="/run/user/$(id -u)/podman/podman.sock"
     [[ -S "$_psock" ]] && export DOCKER_HOST="unix://${_psock}"
   fi
+  # Podman-Login für Compose übernehmen (getrennte Auth-Dateien).
+  _reg="${APP_IMAGE%%/*}"
+  if [[ -n "$_reg" ]] && ! grep -q "$_reg" "$HOME/.docker/config.json" 2>/dev/null; then
+    for _c in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/containers/auth.json" "$HOME/.config/containers/auth.json"; do
+      [[ -f "$_c" ]] && { mkdir -p "$HOME/.docker"; cp "$_c" "$HOME/.docker/config.json"; chmod 600 "$HOME/.docker/config.json"; break; }
+    done
+  fi
 fi
 
 # Docker-Compose-Wrapper — wählt die Variante, die die compose.yml WIRKLICH parst

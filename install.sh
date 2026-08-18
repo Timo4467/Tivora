@@ -142,6 +142,21 @@ ensure_podman_socket() {
   fi
 }
 
+# Podman speichert Registry-Logins in containers/auth.json, Compose v2 liest
+# ~/.docker/config.json. Ist der Login dort noch nicht bekannt, übernehmen wir
+# die vorhandenen Podman-Anmeldedaten (gleiches JSON-Format).
+bridge_podman_auth() {
+  is_podman || return 0
+  local reg="${1:-}" dconf="$HOME/.docker/config.json" pauth="" c
+  if [[ -f "$dconf" && -n "$reg" ]] && grep -q "$reg" "$dconf" 2>/dev/null; then return 0; fi
+  for c in "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/containers/auth.json" "$HOME/.config/containers/auth.json"; do
+    [[ -f "$c" ]] && { pauth="$c"; break; }
+  done
+  [[ -n "$pauth" ]] || return 0
+  mkdir -p "$HOME/.docker" && cp "$pauth" "$dconf" && chmod 600 "$dconf" \
+    && info "Podman-Login für Compose übernommen (~/.docker/config.json)."
+}
+
 # Ist APP_IMAGE ein Registry-Ref (z.B. ghcr.io/owner/img) → dann kann per
 # `docker pull` ein vorgefertigtes Image geladen werden statt lokal zu bauen.
 # Lokale Namen ohne Registry-Host (z.B. tivora/community) werden gebaut.
@@ -380,6 +395,7 @@ start_stack() {
 
   if [[ "$mode" == "pull" ]]; then
     info "Lade vorgefertigtes Image: ${APP_IMAGE} ..."
+    bridge_podman_auth "${APP_IMAGE%%/*}"
     if dc pull; then
       ok "Image geladen"
       dc up -d
@@ -387,8 +403,14 @@ start_stack() {
       warn "Pull fehlgeschlagen — baue stattdessen lokal."
       dc up -d --build
     else
+      local reg="${APP_IMAGE%%/*}"
       err "Image konnte nicht geladen werden: ${APP_IMAGE}"
-      err "Privates Image? Bitte zuerst anmelden:  docker login ghcr.io -u <github-user>"
+      if is_podman; then
+        err "Podman speichert den Login getrennt von Compose. Bitte so anmelden:"
+        echo "    podman login ${reg} -u <github-user> --authfile ~/.docker/config.json"
+      else
+        err "Privates Image? Bitte zuerst anmelden:  docker login ${reg} -u <github-user>"
+      fi
       die "Danach ./install.sh erneut starten."
     fi
   else
