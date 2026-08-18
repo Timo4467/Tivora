@@ -30,11 +30,18 @@ die()   { err "$*"; exit 1; }
 set -a; source "$ENV_FILE"; set +a
 : "${APP_PORT:=3000}"; : "${POSTGRES_USER:=tivora_owner}"; : "${POSTGRES_DB:=tivora}"; : "${APP_VERSION:=1.0.0}"
 
-# Docker-Compose-Wrapper
-if docker compose version >/dev/null 2>&1; then DC="docker compose";
-elif command -v docker-compose >/dev/null 2>&1; then DC="docker-compose";
-else die "Docker Compose nicht gefunden."; fi
+# Docker-Compose-Wrapper — wählt die Variante, die die compose.yml WIRKLICH parst
+# (fängt alte docker-compose v1 / Podman-Shims ab).
+DC=""
 dc() { $DC -f "$COMPOSE_FILE" --env-file "$ENV_FILE" "$@"; }
+for _cand in "docker compose" "docker-compose"; do
+  if $_cand version >/dev/null 2>&1; then
+    DC="$_cand"
+    $DC -f "$COMPOSE_FILE" --env-file "$ENV_FILE" config >/dev/null 2>&1 && break
+    DC=""
+  fi
+done
+[[ -n "$DC" ]] || die "Kein kompatibles Docker Compose v2 gefunden. Bitte ./install.sh ausführen (installiert Compose v2)."
 
 # Registry-Image (ghcr.io/...) → per pull aktualisieren; lokaler Name → bauen.
 is_registry_ref() {
@@ -51,7 +58,21 @@ app_healthy() { curl -fsS "http://127.0.0.1:${APP_PORT}/api/health" >/dev/null 2
 db_healthy()  { dc exec -T postgres pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null 2>&1; }
 
 cmd_status() {
-  dc ps
+  local img="${APP_IMAGE:-}"
+  printf "Image     : "
+  if [[ -n "$img" ]] && docker image inspect "$img" >/dev/null 2>&1; then
+    printf "%s  (lokal vorhanden \u2713)\n" "$img"
+  else
+    printf "%s  (nicht lokal \u2014 wird bei Start gezogen/gebaut)\n" "${img:-?}"
+  fi
+  echo "Container :"
+  dc ps 2>/dev/null || warn "Keine Container (noch nicht gestartet?)."
+  echo
+  if app_healthy; then
+    ok "Tivora LÄUFT und ist erreichbar: ${APP_URL:-http://localhost:$APP_PORT}"
+  else
+    warn "Tivora ist NICHT erreichbar (nicht gestartet oder noch am Starten). Start: ./manage.sh start"
+  fi
   echo
   cmd_health
 }
@@ -196,11 +217,32 @@ cmd_update() {
   cmd_health
 }
 
+# ---------------------------------------------------------------------------
+# Uninstall: Container + Netzwerke entfernen; Daten (Volumes) optional löschen
+# ---------------------------------------------------------------------------
+cmd_uninstall() {
+  warn "Uninstall stoppt und entfernt alle Tivora-Container und -Netzwerke."
+  read -r -p "Fortfahren? (yes/no): " c
+  [[ "$c" == "yes" ]] || die "Abgebrochen."
+
+  warn "Sollen auch die DATEN gelöscht werden (Volumes: Datenbank + Vault/Lizenz)?"
+  warn "Das ist UNWIDERRUFLICH. Vorher ggf. './manage.sh backup' ausführen."
+  read -r -p "Zum LÖSCHEN 'DELETE' eingeben, sonst Enter (Daten behalten): " d
+  if [[ "$d" == "DELETE" ]]; then
+    dc down -v --remove-orphans
+    ok "Container, Netzwerke und Volumes entfernt — Daten gelöscht."
+  else
+    dc down --remove-orphans
+    ok "Container & Netzwerke entfernt. Daten (Volumes) bleiben erhalten."
+    info "Erneut starten:  ./manage.sh start   oder   ./install.sh"
+  fi
+}
+
 cmd_help() {
   cat <<EOF
-Tivora Community Edition — Management
+Tivora — Management
 
-  ./manage.sh status           Container-Status + Health
+  ./manage.sh status           Status: Image da? Container gebaut/laufen? Health
   ./manage.sh start            Stack starten
   ./manage.sh stop             Stack stoppen (Daten bleiben erhalten)
   ./manage.sh restart          Stack neu starten
@@ -208,6 +250,7 @@ Tivora Community Edition — Management
   ./manage.sh logs [service]   Live-Logs (optional: app | postgres)
   ./manage.sh backup           Datenbank + Anwendungsdaten sichern
   ./manage.sh restore <name>   Backup wiederherstellen (ersetzt Daten!)
+  ./manage.sh uninstall        Container/Netzwerke entfernen (Daten optional löschen)
   ./manage.sh health           Health-Report (App/DB/Version/Edition/Users)
   ./manage.sh version          Version & Edition anzeigen
   ./manage.sh help             Diese Hilfe
@@ -230,6 +273,7 @@ main() {
     logs)    SERVICE="${2:-}"; dc logs -f --tail=100 ${SERVICE:+$SERVICE} ;;
     backup)  cmd_backup ;;
     restore) cmd_restore "$@" ;;
+    uninstall) cmd_uninstall ;;
     health)  cmd_health ;;
     version) cmd_version ;;
     help|-h|--help) cmd_help ;;

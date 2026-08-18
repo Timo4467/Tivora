@@ -17,6 +17,9 @@ cd "$SCRIPT_DIR"
 ENV_FILE="$SCRIPT_DIR/.env"
 COMPOSE_FILE="$SCRIPT_DIR/compose.yml"
 
+# Admin-Daten (werden bei Neuinstallation abgefragt; bei .env-Wiederverwendung leer)
+ADMIN_EMAIL=""; ADMIN_FIRST=""; ADMIN_LAST=""; ADMIN_PW=""; ADMIN_PW2=""
+
 # ---- Ausgabe-Helfer --------------------------------------------------------
 c_reset="\033[0m"; c_blue="\033[1;34m"; c_green="\033[1;32m"; c_yellow="\033[1;33m"; c_red="\033[1;31m"; c_dim="\033[2m"
 info()  { printf "${c_blue}➜${c_reset} %s\n" "$*"; }
@@ -329,7 +332,7 @@ confirm_start() {
   printf "  Anwendungs-URL : %s\n" "$APP_URL"
   printf "  Host-Port      : %s\n" "$APP_PORT"
   printf "  Zeitzone       : %s\n" "$TZ"
-  printf "  Admin          : %s\n" "$ADMIN_EMAIL"
+  printf "  Admin          : %s\n" "${ADMIN_EMAIL:-(aus vorhandener .env)}"
   printf "  Datenbank      : automatisch generiert\n"
   hr
   prompt GO "Installation starten? (Y/n)" "Y"
@@ -381,6 +384,18 @@ start_stack() {
 }
 
 create_admin() {
+  # Bereits eingerichtet (z.B. bei .env-Wiederverwendung)? → Admin-Anlage überspringen.
+  local st
+  st="$(curl -fsS "http://127.0.0.1:${APP_PORT}/api/system/setup-status" 2>/dev/null || echo '')"
+  case "$st" in
+    *'"configured":true'*)
+      info "Installation ist bereits eingerichtet — Admin-Anlage übersprungen."; echo; return 0 ;;
+  esac
+  if [[ -z "${ADMIN_PW:-}" || -z "${ADMIN_EMAIL:-}" ]]; then
+    warn "Keine Admin-Daten angegeben (vorhandene .env wiederverwendet)."
+    warn "Ersteinrichtung im Browser abschließen: ${APP_URL}"
+    echo; return 0
+  fi
   info "Lege ersten Administrator an ..."
   local payload status body
   payload=$(cat <<JSON
